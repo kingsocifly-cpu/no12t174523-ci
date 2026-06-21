@@ -1,0 +1,90 @@
+name: APK (uma variante)
+
+# Gera UM APK escolhendo nome / bundle id / icones na hora (Run workflow).
+# Roda no repo PUBLICO e clona o codigo do repo PRIVADO via SRC_TOKEN.
+
+on:
+  workflow_dispatch:
+    inputs:
+      app_name:
+        description: "Nome do app (tela inicial). Ex: Cakto"
+        default: "Notify Mancer"
+      app_id:
+        description: "Bundle/Package ID (UNICO). Ex: com.notifymancer.app1"
+        default: "com.notifymancer.app"
+      main_icon:
+        description: "Icone principal: nome do arquivo em www/icons SEM extensao. Ex: icone1"
+        default: "bat-classic"
+      notif_icon:
+        description: "Icone pequeno da notificacao (silhueta). Vazio = usa o principal."
+        default: ""
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout codigo PRIVADO
+        uses: actions/checkout@v4
+        with:
+          repository: kingsocifly-cpu/Notify
+          token: ${{ secrets.SRC_TOKEN }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Setup Java (JDK 21)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Instalar dependencias
+        run: npm install
+
+      - name: Patch notificacao (nome do app na notificacao)
+        run: node scripts/patch-plugin-android.mjs
+
+      - name: Configurar variante (nome / package id)
+        run: |
+          node -e "const fs=require('fs');const p='capacitor.config.json';const c=JSON.parse(fs.readFileSync(p,'utf8'));if(process.env.APP_NAME)c.appName=process.env.APP_NAME;if(process.env.APP_ID)c.appId=process.env.APP_ID;fs.writeFileSync(p,JSON.stringify(c,null,2));console.log('Variante:',c.appName,'|',c.appId);"
+        env:
+          APP_NAME: ${{ github.event.inputs.app_name }}
+          APP_ID: ${{ github.event.inputs.app_id }}
+
+      - name: Adicionar plataforma Android
+        run: npx cap add android
+
+      - name: Sincronizar web -> Android
+        run: npx cap sync android
+
+      - name: Gerar icones + troca de icone (aliases)
+        run: npm run icons:android
+        env:
+          MAIN_ICON: ${{ github.event.inputs.main_icon }}
+          NOTIF_ICON: ${{ github.event.inputs.notif_icon }}
+
+      - name: Gerar sons (res/raw)
+        run: npm run sounds:android
+
+      - name: Build do APK (debug)
+        working-directory: android
+        run: |
+          chmod +x ./gradlew
+          set -o pipefail
+          ./gradlew assembleDebug --no-daemon --stacktrace
+
+      - name: Renomear APK
+        run: cp android/app/build/outputs/apk/debug/app-debug.apk "${{ github.event.inputs.app_name }}.apk"
+
+      - name: Publicar artefato (.apk)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ github.event.inputs.app_name }}-apk
+          path: ${{ github.event.inputs.app_name }}.apk
+          retention-days: 14
