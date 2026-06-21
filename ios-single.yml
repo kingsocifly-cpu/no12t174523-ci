@@ -1,0 +1,98 @@
+name: IPA (uma variante, unsigned)
+
+# Gera UM IPA (sem assinatura) escolhendo nome / bundle id / icone na hora.
+# Roda no repo PUBLICO e clona o codigo do repo PRIVADO via SRC_TOKEN.
+
+on:
+  workflow_dispatch:
+    inputs:
+      app_name:
+        description: "Nome do app (tela inicial). Ex: Cakto"
+        default: "Notify Mancer"
+      app_id:
+        description: "Bundle ID (UNICO, mantenha o prefixo com.notifymancer). Ex: com.notifymancer.app1"
+        default: "com.notifymancer.app"
+      main_icon:
+        description: "Icone principal: nome do arquivo em www/icons SEM extensao. Ex: icone1"
+        default: "bat-classic"
+
+jobs:
+  build:
+    runs-on: macos-14
+    timeout-minutes: 40
+    steps:
+      - name: Checkout codigo PRIVADO
+        uses: actions/checkout@v4
+        with:
+          repository: kingsocifly-cpu/Notify
+          token: ${{ secrets.SRC_TOKEN }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Instalar dependencias
+        run: npm install
+
+      - name: Configurar variante (nome / bundle id)
+        run: |
+          node -e "const fs=require('fs');const p='capacitor.config.json';const c=JSON.parse(fs.readFileSync(p,'utf8'));if(process.env.APP_NAME)c.appName=process.env.APP_NAME;if(process.env.APP_ID)c.appId=process.env.APP_ID;fs.writeFileSync(p,JSON.stringify(c,null,2));console.log('Variante:',c.appName,'|',c.appId);"
+        env:
+          APP_NAME: ${{ github.event.inputs.app_name }}
+          APP_ID: ${{ github.event.inputs.app_id }}
+
+      - name: Patch - mostrar notificacoes em foreground
+        run: node scripts/patch-plugin.mjs
+
+      - name: Adicionar plataforma iOS
+        run: npx cap add ios
+
+      - name: Forcar nome de exibicao (variante)
+        run: |
+          PLIST="ios/App/App/Info.plist"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName ${{ github.event.inputs.app_name }}" "$PLIST" || /usr/libexec/PlistBuddy -c "Add :CFBundleDisplayName string ${{ github.event.inputs.app_name }}" "$PLIST"
+
+      - name: Sincronizar web -> iOS
+        run: npx cap sync ios
+
+      - name: Gerar icone principal + alternativos
+        run: npm run icons
+        env:
+          MAIN_ICON: ${{ github.event.inputs.main_icon }}
+
+      - name: Gerar som de venda (cha-ching)
+        run: node scripts/build-sounds.mjs
+
+      - name: Build do archive (sem assinatura)
+        working-directory: ios/App
+        run: |
+          xcodebuild \
+            -workspace App.xcworkspace \
+            -scheme App \
+            -configuration Release \
+            -sdk iphoneos \
+            -archivePath "$PWD/build/App.xcarchive" \
+            archive \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            DEVELOPMENT_TEAM=""
+
+      - name: Injetar icones alternativos no Info.plist (pos-build)
+        run: node scripts/inject-alt-icons.mjs "ios/App/build/App.xcarchive/Products/Applications/App.app/Info.plist"
+
+      - name: Empacotar .ipa (unsigned)
+        working-directory: ios/App
+        run: |
+          mkdir -p build/Payload
+          cp -R build/App.xcarchive/Products/Applications/App.app build/Payload/
+          cd build
+          zip -qr "${{ github.event.inputs.app_name }}.ipa" Payload
+
+      - name: Publicar artefato (.ipa)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ github.event.inputs.app_name }}-ipa
+          path: ios/App/build/${{ github.event.inputs.app_name }}.ipa
+          retention-days: 14
