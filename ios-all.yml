@@ -1,0 +1,130 @@
+name: IPAs (todas as variantes, unsigned)
+
+# Roda no repo PUBLICO (macOS gratis/ilimitado). Clona o codigo do repo PRIVADO via
+# secret SRC_TOKEN, builda os 22 IPAs (sem assinatura, p/ eSign/Sideloadly) e junta
+# tudo num zip unico.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-14
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      max-parallel: 5
+      matrix:
+        variant:
+          - { name: "Cakto",         app_id: "com.notifymancer.app1",  icon: "icone1"  }
+          - { name: "Braip",         app_id: "com.notifymancer.app2",  icon: "icone2"  }
+          - { name: "Appmax",        app_id: "com.notifymancer.app3",  icon: "icone3"  }
+          - { name: "SellerCenter",  app_id: "com.notifymancer.app4",  icon: "icone4"  }
+          - { name: "Eduzz",         app_id: "com.notifymancer.app5",  icon: "icone5"  }
+          - { name: "Hotmart",       app_id: "com.notifymancer.app6",  icon: "icone6"  }
+          - { name: "Kirvano",       app_id: "com.notifymancer.app7",  icon: "icone7"  }
+          - { name: "Kiwify Cursos", app_id: "com.notifymancer.app8",  icon: "icone8"  }
+          - { name: "Pepper",        app_id: "com.notifymancer.app9",  icon: "icone9"  }
+          - { name: "Perfect Pay",   app_id: "com.notifymancer.app10", icon: "icone10" }
+          - { name: "Shopify",       app_id: "com.notifymancer.app11", icon: "icone11" }
+          - { name: "SuitPay",       app_id: "com.notifymancer.app12", icon: "icone12" }
+          - { name: "Utmify",        app_id: "com.notifymancer.app13", icon: "icone13" }
+          - { name: "AmazonSeller",  app_id: "com.notifymancer.app14", icon: "icone14" }
+          - { name: "Amazon",        app_id: "com.notifymancer.app15", icon: "icone15" }
+          - { name: "Santander",     app_id: "com.notifymancer.app16", icon: "icone16" }
+          - { name: "Itaú",          app_id: "com.notifymancer.app17", icon: "icone17" }
+          - { name: "Inter",         app_id: "com.notifymancer.app18", icon: "icone18" }
+          - { name: "Nubank",        app_id: "com.notifymancer.app19", icon: "icone19" }
+          - { name: "Mercado Pago",  app_id: "com.notifymancer.app20", icon: "icone20" }
+          - { name: "C6 Bank",       app_id: "com.notifymancer.app21", icon: "icone21" }
+          - { name: "InfinitePay",   app_id: "com.notifymancer.app22", icon: "icone22" }
+
+    steps:
+      - name: Checkout codigo PRIVADO
+        uses: actions/checkout@v4
+        with:
+          repository: kingsocifly-cpu/Notify
+          token: ${{ secrets.SRC_TOKEN }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Instalar dependencias
+        run: npm install
+
+      - name: Configurar variante (nome / bundle id)
+        run: |
+          node -e "const fs=require('fs');const p='capacitor.config.json';const c=JSON.parse(fs.readFileSync(p,'utf8'));c.appName=process.env.APP_NAME;c.appId=process.env.APP_ID;fs.writeFileSync(p,JSON.stringify(c,null,2));console.log('Variante:',c.appName,'|',c.appId);"
+        env:
+          APP_NAME: ${{ matrix.variant.name }}
+          APP_ID: ${{ matrix.variant.app_id }}
+
+      - name: Patch - mostrar notificacoes em foreground
+        run: node scripts/patch-plugin.mjs
+
+      - name: Adicionar plataforma iOS
+        run: npx cap add ios
+
+      - name: Forcar nome de exibicao (variante)
+        run: |
+          PLIST="ios/App/App/Info.plist"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName ${{ matrix.variant.name }}" "$PLIST" || /usr/libexec/PlistBuddy -c "Add :CFBundleDisplayName string ${{ matrix.variant.name }}" "$PLIST"
+
+      - name: Sincronizar web -> iOS
+        run: npx cap sync ios
+
+      - name: Gerar icone principal + alternativos
+        run: npm run icons
+        env:
+          MAIN_ICON: ${{ matrix.variant.icon }}
+
+      - name: Gerar som de venda (cha-ching)
+        run: node scripts/build-sounds.mjs
+
+      - name: Build do archive (sem assinatura)
+        working-directory: ios/App
+        run: |
+          xcodebuild \
+            -workspace App.xcworkspace \
+            -scheme App \
+            -configuration Release \
+            -sdk iphoneos \
+            -archivePath "$PWD/build/App.xcarchive" \
+            archive \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            DEVELOPMENT_TEAM=""
+
+      - name: Injetar icones alternativos no Info.plist (pos-build)
+        run: node scripts/inject-alt-icons.mjs "ios/App/build/App.xcarchive/Products/Applications/App.app/Info.plist"
+
+      - name: Empacotar .ipa (unsigned)
+        working-directory: ios/App
+        run: |
+          mkdir -p build/Payload
+          cp -R build/App.xcarchive/Products/Applications/App.app build/Payload/
+          cd build
+          zip -qr "${{ matrix.variant.name }}.ipa" Payload
+
+      - name: Publicar artefato (.ipa)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.variant.name }}-ipa
+          path: ios/App/build/${{ matrix.variant.name }}.ipa
+          retention-days: 14
+
+  juntar:
+    runs-on: ubuntu-latest
+    needs: build
+    if: always()
+    steps:
+      - name: Juntar todos os IPAs num zip unico
+        uses: actions/upload-artifact/merge@v4
+        with:
+          name: NotifyMancer-TODOS-IPAs
+          pattern: "*-ipa"
+          delete-merged: true
+          retention-days: 14
